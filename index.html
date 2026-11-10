@@ -161,7 +161,7 @@
 
         /* Sidebar File Explorer */
         .sidebar {
-            width: 280px;
+            width: 310px;
             background-color: var(--bg-panel);
             border-right: 1px solid var(--border);
             display: flex;
@@ -181,6 +181,47 @@
             align-items: center;
         }
 
+        .remote-sync-panel {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            background-color: var(--bg-dark);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .remote-sync-panel label,
+        .file-editor-panel label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .remote-row {
+            display: flex;
+            gap: 4px;
+        }
+
+        .remote-row input {
+            flex: 1;
+            background-color: var(--bg-cell);
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.78rem;
+            outline: none;
+        }
+
+        .remote-status {
+            font-size: 0.74rem;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+
         .file-list {
             flex: 1;
             overflow-y: auto;
@@ -194,10 +235,11 @@
             align-items: center;
             padding: 6px 10px;
             border-radius: 4px;
-            margin-bottom: 2px;
+            margin-bottom: 3px;
             background-color: var(--bg-cell);
             border: 1px solid var(--border);
-            font-size: 0.84rem;
+            font-size: 0.82rem;
+            font-family: monospace;
             cursor: pointer;
         }
 
@@ -213,23 +255,16 @@
         .file-actions button {
             padding: 2px 5px;
             font-size: 0.72rem;
+            font-family: sans-serif;
         }
 
         .file-editor-panel {
             border-top: 1px solid var(--border);
-            padding: 10px;
+            padding: 10px 12px;
             display: flex;
             flex-direction: column;
             gap: 6px;
             background-color: var(--bg-dark);
-        }
-
-        .file-editor-panel label {
-            font-size: 0.75rem;
-            font-weight: 600;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
         }
 
         .file-editor-panel input,
@@ -246,12 +281,13 @@
         }
 
         .file-editor-panel input:focus,
-        .file-editor-panel textarea:focus {
+        .file-editor-panel textarea:focus,
+        .remote-row input:focus {
             border-color: var(--text-muted);
         }
 
         .file-editor-panel textarea {
-            height: 90px;
+            height: 85px;
             resize: vertical;
         }
 
@@ -391,14 +427,27 @@
         <!-- Sidebar File System Explorer -->
         <aside class="sidebar">
             <div class="sidebar-header">
-                <span>File System</span>
-                <button onclick="syncBrowserToFS()">Sync</button>
+                <span>Virtual File System</span>
+                <button onclick="syncBrowserToFS()">Sync FS</button>
             </div>
+
+            <!-- Remote / Local Directory Mount Panel -->
+            <div class="remote-sync-panel">
+                <label>Repository Directory Loader</label>
+                <div class="remote-row">
+                    <input type="text" id="target-folder-input" value="data" placeholder="Folder path (e.g. data)">
+                    <button onclick="fetchRemoteDirectory()" id="btn-fetch-remote" disabled>Fetch</button>
+                    <button onclick="document.getElementById('local-dir-picker').click()" id="btn-mount-local" disabled title="Mount local directory from disk">Local</button>
+                    <input type="file" id="local-dir-picker" webkitdirectory directory multiple style="display:none" onchange="handleLocalDirectoryMount(event)">
+                </div>
+                <div id="remote-status" class="remote-status">Target: ./data/</div>
+            </div>
+
             <ul id="file-list" class="file-list"></ul>
 
             <div class="file-editor-panel">
-                <label>File Management (data/ files are read-only)</label>
-                <input type="text" id="file-name-input" placeholder="output/file.csv or notes.txt">
+                <label>File Inspector / Editor</label>
+                <input type="text" id="file-name-input" placeholder="data/filename.csv">
                 <textarea id="file-content-input" placeholder="File content..."></textarea>
                 <button onclick="saveFileFromUI()" id="btn-save-file" disabled>Write File</button>
             </div>
@@ -411,42 +460,68 @@
     <script>
         let pyodide = null;
         let executionCount = 1;
-        const STORAGE_FS_KEY = 'pynotebook_virtual_fs';
-        const STORAGE_CELLS_KEY = 'pynotebook_cells';
+        const STORAGE_FS_KEY = 'pynotebook_virtual_fs_v2';
+        const STORAGE_CELLS_KEY = 'pynotebook_cells_v2';
         const STORAGE_THEME_KEY = 'pynotebook_theme';
-        const DATA_FOLDER_URL = './data/';
-        const DATA_MANIFEST_FILE = 'manifest.json';
-        // Files listed in data/manifest.json are loaded from the deployed repository
-        // and treated as read-only source files in the file manager.
-        const repositoryDataFiles = new Set();
-        const IGNORED_ROOT_DIRECTORIES = new Set([
-            'bin', 'dev', 'etc', 'home', 'lib', 'opt', 'proc', 'root', 'tmp', 'usr', 'var'
-        ]);
+        const DEFAULT_DATA_DIR = 'data';
 
-        const defaultCells = [
-`from pathlib import Path
-
-# List every file loaded from the repository's data/ folder, including subfolders.
-data_dir = Path("data")
-files = sorted(path for path in data_dir.rglob("*") if path.is_file())
-
-print("Files available in data/:")
-for path in files:
-    print("-", path.as_posix())`,
-
-`import pandas as pd
-
-# Read a CSV committed inside the repository's data/ folder.
-df = pd.read_csv("data/sample.csv")
-df`,
-
-`from pathlib import Path
-
-# Read a plain-text file from the same folder.
-text = Path("data/notes.txt").read_text(encoding="utf-8")
-print(text)`
+        /**
+         * FALLBACK MANIFEST:
+         * When deployed on GitHub Pages (*.github.io), the script automatically discovers
+         * all files inside './data' via the GitHub REST API.
+         * If hosted on a static server without directory listing or GitHub API, list known files here:
+         */
+        const STATIC_DATA_MANIFEST = [
+            // 'sample.csv',
+            // 'notes.txt'
         ];
 
+        const ALLOWED_TEXT_EXTENSIONS = [
+            '.txt', '.csv', '.tsv', '.json', '.md', '.py', '.xml', '.yaml', '.yml', '.ini', '.cfg', '.log', '.sql'
+        ];
+
+        const defaultCells = [
+`import os
+import numpy as np
+import pandas as pd
+
+# Ensure 'data' directory exists and inspect available files
+os.makedirs('data', exist_ok=True)
+files_in_data = os.listdir('data')
+print(f"Directory './data' contents ({len(files_in_data)} files):", files_in_data)
+
+# If './data' has no CSV yet, generate a default dataset inside './data/dataset.csv'
+if not any(f.endswith('.csv') for f in files_in_data):
+    np.random.seed(42)
+    df_init = pd.DataFrame({
+        'Identifier': ['Node-A', 'Node-B', 'Node-C', 'Node-D', 'Node-E'],
+        'Metric_X': np.random.randint(10, 500, size=5),
+        'Metric_Y': np.random.randint(1, 100, size=5)
+    })
+    df_init.to_csv('data/dataset.csv', index=False)
+    print("Created default file: data/dataset.csv")`,
+
+`import glob
+import pandas as pd
+
+# Read all CSV and TXT files located in the 'data/' directory
+csv_files = sorted(glob.glob('data/*.csv'))
+txt_files = sorted(glob.glob('data/*.txt'))
+
+print("Detected CSV files:", csv_files)
+print("Detected TXT files:", txt_files)
+
+if csv_files:
+    target_csv = csv_files[0]
+    print(f"\\nLoading '{target_csv}':")
+    df = pd.read_csv(target_csv)
+else:
+    df = pd.DataFrame()
+
+df`
+        ];
+
+        // 1. Theme Configuration
         function initTheme() {
             const savedTheme = localStorage.getItem(STORAGE_THEME_KEY);
             if (savedTheme === 'light') {
@@ -468,6 +543,7 @@ print(text)`
             btn.textContent = isLight ? 'Dark Mode' : 'Light Mode';
         }
 
+        // 2. Adaptive Cell Sizing
         function autoResizeTextarea(textarea) {
             textarea.style.height = 'auto';
             textarea.style.height = textarea.scrollHeight + 'px';
@@ -477,6 +553,7 @@ print(text)`
             document.querySelectorAll('.code-input').forEach(ta => autoResizeTextarea(ta));
         }
 
+        // 3. Pyodide & Virtual File System Initialization
         async function initPyodideEnv() {
             const statusEl = document.getElementById('status');
             try {
@@ -484,19 +561,25 @@ print(text)`
                 statusEl.textContent = "Loading Packages";
                 await pyodide.loadPackage(['numpy', 'pandas']);
 
-                statusEl.textContent = "Loading data folder";
-                const loadedCount = await loadRepositoryDataFolder();
+                // Create default 'data' directory in Pyodide FS
+                ensurePyodideDir(DEFAULT_DATA_DIR);
+
+                // Restore previously saved files from localStorage
                 syncBrowserToFS();
 
-                statusEl.textContent = loadedCount > 0
-                    ? `Ready (Python 3.11 · ${loadedCount} data files)`
-                    : "Ready (Python 3.11 · no data files found)";
+                // Automatically fetch files from the repository's './data' folder
+                await fetchRemoteDirectory(DEFAULT_DATA_DIR);
+
+                statusEl.textContent = "Ready (Python 3.11)";
                 statusEl.classList.add('ready');
 
                 document.getElementById('btn-add-cell').disabled = false;
                 document.getElementById('btn-run-all').disabled = false;
                 document.getElementById('btn-save-file').disabled = false;
+                document.getElementById('btn-fetch-remote').disabled = false;
+                document.getElementById('btn-mount-local').disabled = false;
                 document.querySelectorAll('.run-btn').forEach(btn => btn.disabled = false);
+
             } catch (err) {
                 statusEl.textContent = "Initialization Failed";
                 statusEl.style.color = "var(--error)";
@@ -504,116 +587,216 @@ print(text)`
             }
         }
 
-        // Normalize a relative path before using it inside Pyodide's virtual filesystem.
-        // This prevents absolute paths and ../ path traversal in localStorage or the manifest.
-        function normalizeVirtualPath(path) {
-            if (typeof path !== 'string') return null;
-            const normalized = path.trim().replace(/\\/g, '/').replace(/^\.\//, '');
-            if (!normalized || normalized.startsWith('/')) return null;
-
-            const parts = normalized.split('/');
-            if (parts.some(part => !part || part === '.' || part === '..')) return null;
-            if (normalized.includes('\0')) return null;
-            return parts.join('/');
-        }
-
-        function writeVirtualFile(path, content) {
-            const safePath = normalizeVirtualPath(path);
-            if (!pyodide || !safePath) {
-                throw new Error(`Invalid virtual file path: ${path}`);
-            }
-
-            const parts = safePath.split('/');
-            if (parts.length > 1) {
-                const parentDirectory = '/' + parts.slice(0, -1).join('/');
-                pyodide.FS.mkdirTree(parentDirectory);
-            }
-            pyodide.FS.writeFile('/' + safePath, content, { encoding: 'utf8' });
-        }
-
-        function readVirtualFile(path) {
-            const safePath = normalizeVirtualPath(path);
-            if (!pyodide || !safePath) return null;
-            try {
-                return pyodide.FS.readFile('/' + safePath, { encoding: 'utf8' });
-            } catch (err) {
-                return null;
-            }
-        }
-
-        async function loadRepositoryDataFolder() {
-            repositoryDataFiles.clear();
-            if (!pyodide) return 0;
-
-            try {
-                const dataBaseUrl = new URL(DATA_FOLDER_URL, window.location.href);
-                const manifestUrl = new URL(DATA_MANIFEST_FILE, dataBaseUrl);
-                const manifestResponse = await fetch(manifestUrl, { cache: 'no-cache' });
-
-                if (!manifestResponse.ok) {
-                    if (manifestResponse.status !== 404) {
-                        console.warn(`Could not load ${manifestUrl}: HTTP ${manifestResponse.status}`);
-                    } else {
-                        console.info('No data/manifest.json found. The data folder is currently empty.');
-                    }
-                    renderFileList();
-                    return 0;
+        // Helper: Recursively create directories in Pyodide Emscripten FS
+        function ensurePyodideDir(dirPath) {
+            if (!pyodide || !dirPath) return;
+            const parts = dirPath.split('/').filter(Boolean);
+            let current = '';
+            for (const part of parts) {
+                current = current ? `${current}/${part}` : part;
+                try {
+                    pyodide.FS.mkdir(current);
+                } catch (e) {
+                    // Directory already exists
                 }
+            }
+        }
 
-                const manifest = await manifestResponse.json();
-                const fileEntries = Array.isArray(manifest) ? manifest : manifest.files;
-                if (!Array.isArray(fileEntries)) {
-                    throw new Error('data/manifest.json must be an array or an object with a "files" array.');
+        // Write a file (supporting nested paths like 'data/file.csv') into Pyodide FS
+        function writeFileToPyodide(relativePath, content) {
+            if (!pyodide) return;
+            const normalized = relativePath.replace(/^\/+/, '');
+            const lastSlash = normalized.lastIndexOf('/');
+            if (lastSlash !== -1) {
+                const dir = normalized.substring(0, lastSlash);
+                ensurePyodideDir(dir);
+            }
+            pyodide.FS.writeFile(normalized, content, { encoding: 'utf8' });
+        }
+
+        // 4. Automatic Remote Directory Discovery (GitHub Pages API + Index Listing + Manifest)
+        function isTextFile(filename) {
+            const lower = filename.toLowerCase();
+            return ALLOWED_TEXT_EXTENSIONS.some(ext => lower.endsWith(ext));
+        }
+
+        function detectGitHubPagesRepo() {
+            const host = window.location.hostname;
+            const pathParts = window.location.pathname.split('/').filter(Boolean);
+
+            // Standard GitHub Pages URL: https://{owner}.github.io/{repo}/...
+            if (host.endsWith('.github.io')) {
+                const owner = host.split('.')[0];
+                // Remove index.html if present at the end
+                const cleanParts = [...pathParts];
+                if (cleanParts.length > 0 && cleanParts[cleanParts.length - 1].includes('.')) {
+                    cleanParts.pop();
                 }
+                if (cleanParts.length >= 1) {
+                    const repo = cleanParts[0];
+                    const subPath = cleanParts.slice(1).join('/');
+                    return { owner, repo, subPath };
+                }
+            }
+            return null;
+        }
 
-                let loadedCount = 0;
-                for (const entry of fileEntries) {
-                    const relativePath = normalizeVirtualPath(
-                        typeof entry === 'string' ? entry : entry?.path
-                    );
-                    if (!relativePath) {
-                        console.warn('Skipping invalid path in data/manifest.json:', entry);
-                        continue;
-                    }
+        async function fetchRemoteDirectory(folderOverride) {
+            const inputEl = document.getElementById('target-folder-input');
+            const statusEl = document.getElementById('remote-status');
+            const targetFolder = (folderOverride || inputEl.value || DEFAULT_DATA_DIR).trim().replace(/^\/+|\/+$/g, '');
+            inputEl.value = targetFolder;
 
-                    const encodedPath = relativePath.split('/').map(encodeURIComponent).join('/');
-                    const fileUrl = new URL(encodedPath, dataBaseUrl);
-                    try {
-                        const response = await fetch(fileUrl);
-                        if (!response.ok) {
-                            console.warn(`Could not load ${relativePath}: HTTP ${response.status}`);
-                            continue;
+            ensurePyodideDir(targetFolder);
+            statusEl.textContent = `Scanning ./${targetFolder}/ ...`;
+
+            let loadedCount = 0;
+
+            // Strategy A: GitHub Repository API auto-discovery (works automatically on GitHub Pages)
+            const ghInfo = detectGitHubPagesRepo();
+            if (ghInfo) {
+                const apiFolderPath = ghInfo.subPath ? `${ghInfo.subPath}/${targetFolder}` : targetFolder;
+                const apiUrl = `https://api.github.com/repos/${ghInfo.owner}/${ghInfo.repo}/contents/${apiFolderPath}`;
+                try {
+                    const res = await fetch(apiUrl);
+                    if (res.ok) {
+                        const items = await res.json();
+                        if (Array.isArray(items)) {
+                            loadedCount += await processGitHubContentsRecursively(items, targetFolder);
                         }
-
-                        const content = await response.text();
-                        const virtualPath = `data/${relativePath}`;
-                        writeVirtualFile(virtualPath, content);
-                        repositoryDataFiles.add(virtualPath);
-                        loadedCount += 1;
-                    } catch (err) {
-                        console.warn(`Could not load data file ${relativePath}:`, err);
                     }
+                } catch (e) {
+                    console.warn("GitHub API directory scan skipped:", e);
                 }
+            }
 
-                renderFileList();
-                return loadedCount;
-            } catch (err) {
-                console.warn('The repository data folder could not be loaded:', err);
-                renderFileList();
-                return 0;
+            // Strategy B: Optional ./{folder}/index.json or directory HTML listing (works on local Python http.server / Nginx / Apache)
+            if (loadedCount === 0) {
+                try {
+                    // Check if a manifest JSON exists at ./data/index.json
+                    const manifestRes = await fetch(`${targetFolder}/index.json`, { cache: 'no-cache' });
+                    if (manifestRes.ok) {
+                        const fileList = await manifestRes.json();
+                        if (Array.isArray(fileList)) {
+                            for (const fileRel of fileList) {
+                                const ok = await fetchAndMountSingleFile(`${targetFolder}/${fileRel}`);
+                                if (ok) loadedCount++;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // Strategy C: Parse HTML directory listing if server auto-indexes ./data/
+            if (loadedCount === 0) {
+                try {
+                    const dirRes = await fetch(`${targetFolder}/`);
+                    if (dirRes.ok) {
+                        const contentType = dirRes.headers.get('content-type') || '';
+                        if (contentType.includes('text/html')) {
+                            const htmlText = await dirRes.text();
+                            const parser = new DOMParser();
+                            const doc = parser.parseFromString(htmlText, 'text/html');
+                            const links = Array.from(doc.querySelectorAll('a'))
+                                .map(a => a.getAttribute('href'))
+                                .filter(href => href && !href.startsWith('?') && !href.startsWith('/') && !href.startsWith('..') && !href.endsWith('/'));
+
+                            for (const link of links) {
+                                const decoded = decodeURIComponent(link);
+                                if (isTextFile(decoded)) {
+                                    const ok = await fetchAndMountSingleFile(`${targetFolder}/${decoded}`);
+                                    if (ok) loadedCount++;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // Strategy D: Static fallback manifest array
+            if (loadedCount === 0 && STATIC_DATA_MANIFEST.length > 0) {
+                for (const item of STATIC_DATA_MANIFEST) {
+                    const fullPath = item.startsWith(targetFolder + '/') ? item : `${targetFolder}/${item}`;
+                    const ok = await fetchAndMountSingleFile(fullPath);
+                    if (ok) loadedCount++;
+                }
+            }
+
+            syncFSToBrowser();
+            statusEl.textContent = loadedCount > 0
+                ? `Mounted ${loadedCount} file(s) from ./${targetFolder}/`
+                : `Directory ./${targetFolder}/ ready (${Object.keys(getStoredFiles()).length} cached)`;
+        }
+
+        async function processGitHubContentsRecursively(items, baseVirtualPath) {
+            let count = 0;
+            for (const item of items) {
+                if (item.type === 'file' && isTextFile(item.name) && item.download_url) {
+                    try {
+                        const res = await fetch(item.download_url);
+                        if (res.ok) {
+                            const text = await res.text();
+                            const virtualPath = `${baseVirtualPath}/${item.name}`;
+                            writeFileToPyodide(virtualPath, text);
+                            count++;
+                        }
+                    } catch (e) {}
+                } else if (item.type === 'dir' && item.url) {
+                    try {
+                        const subRes = await fetch(item.url);
+                        if (subRes.ok) {
+                            const subItems = await subRes.json();
+                            if (Array.isArray(subItems)) {
+                                count += await processGitHubContentsRecursively(subItems, `${baseVirtualPath}/${item.name}`);
+                            }
+                        }
+                    } catch (e) {}
+                }
+            }
+            return count;
+        }
+
+        async function fetchAndMountSingleFile(relativePath) {
+            try {
+                const res = await fetch(relativePath, { cache: 'no-cache' });
+                if (!res.ok) return false;
+                const text = await res.text();
+                writeFileToPyodide(relativePath, text);
+                return true;
+            } catch (e) {
+                return false;
             }
         }
 
+        // 5. Local Disk Directory Mount (for offline/local testing)
+        async function handleLocalDirectoryMount(event) {
+            const files = Array.from(event.target.files || []);
+            if (files.length === 0) return;
+
+            const targetFolder = (document.getElementById('target-folder-input').value || DEFAULT_DATA_DIR).trim().replace(/^\/+|\/+$/g, '');
+            const statusEl = document.getElementById('remote-status');
+            let mounted = 0;
+
+            for (const file of files) {
+                if (!isTextFile(file.name)) continue;
+                const text = await file.text();
+                // Strip the root selected folder name and mount inside targetFolder (e.g., 'data/...')
+                const relParts = (file.webkitRelativePath || file.name).split('/');
+                const subPath = relParts.length > 1 ? relParts.slice(1).join('/') : file.name;
+                const finalPath = `${targetFolder}/${subPath}`;
+                writeFileToPyodide(finalPath, text);
+                mounted++;
+            }
+
+            syncFSToBrowser();
+            statusEl.textContent = `Mounted ${mounted} local file(s) into ./${targetFolder}/`;
+            event.target.value = '';
+        }
+
+        // 6. Recursive Synchronization Between Pyodide FS and Browser localStorage
         function getStoredFiles() {
             const raw = localStorage.getItem(STORAGE_FS_KEY);
-            if (!raw) return {};
-            try {
-                const parsed = JSON.parse(raw);
-                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-            } catch (err) {
-                console.warn('Could not read saved virtual files:', err);
-                return {};
-            }
+            return raw ? JSON.parse(raw) : {};
         }
 
         function setStoredFiles(filesObj) {
@@ -621,160 +804,100 @@ print(text)`
             renderFileList();
         }
 
-        // Restore files created in the browser. Repository data files are fetched fresh
-        // from /data on startup and are deliberately not overwritten by localStorage.
         function syncBrowserToFS() {
             if (!pyodide) return;
+            ensurePyodideDir(DEFAULT_DATA_DIR);
             const files = getStoredFiles();
-            for (const [filename, content] of Object.entries(files)) {
-                const safePath = normalizeVirtualPath(filename);
-                if (!safePath || repositoryDataFiles.has(safePath)) continue;
-                try {
-                    writeVirtualFile(safePath, String(content));
-                } catch (err) {
-                    console.warn(`Could not restore ${filename}:`, err);
-                }
+            for (const [filepath, content] of Object.entries(files)) {
+                writeFileToPyodide(filepath, content);
             }
             renderFileList();
         }
 
-        // Persist user-created files recursively, including files in subfolders.
-        // The files committed under data/ remain repository-managed and are fetched
-        // again on the next page load.
-        function syncFSToBrowser() {
-            if (!pyodide) return;
-            const storedFiles = {};
+        function scanPyodideDirectoryRecursive(dirPath, rootDir, accumulator) {
+            const entries = pyodide.FS.readdir(dirPath);
+            for (const entry of entries) {
+                if (entry === '.' || entry === '..' || entry.startsWith('.')) continue;
+                const fullPath = `${dirPath}/${entry}`;
+                const relPath = fullPath.substring(rootDir.length + 1);
+                const stat = pyodide.FS.stat(fullPath);
 
-            function walkDirectory(absoluteDirectory, relativeDirectory = '') {
-                let entries = [];
-                try {
-                    entries = pyodide.FS.readdir(absoluteDirectory);
-                } catch (err) {
-                    return;
-                }
-
-                for (const entry of entries) {
-                    if (entry === '.' || entry === '..' || entry.startsWith('.')) continue;
-                    if (!relativeDirectory && IGNORED_ROOT_DIRECTORIES.has(entry)) continue;
-
-                    const absolutePath = `${absoluteDirectory.replace(/\/$/, '')}/${entry}`;
-                    const relativePath = relativeDirectory ? `${relativeDirectory}/${entry}` : entry;
-
+                if (pyodide.FS.isDir(stat.mode)) {
+                    scanPyodideDirectoryRecursive(fullPath, rootDir, accumulator);
+                } else if (pyodide.FS.isFile(stat.mode)) {
                     try {
-                        const stat = pyodide.FS.stat(absolutePath);
-                        if (pyodide.FS.isDir(stat.mode)) {
-                            walkDirectory(absolutePath, relativePath);
-                        } else if (pyodide.FS.isFile(stat.mode)) {
-                            if (repositoryDataFiles.has(relativePath)) continue;
-                            const content = pyodide.FS.readFile(absolutePath, { encoding: 'utf8' });
-                            storedFiles[relativePath] = content;
-                        }
-                    } catch (err) {
-                        // Ignore virtual filesystem entries that cannot be read as text.
+                        const content = pyodide.FS.readFile(fullPath, { encoding: 'utf8' });
+                        accumulator[relPath] = content;
+                    } catch (e) {
+                        // Skip non-UTF8 binary files
                     }
                 }
             }
+        }
 
-            walkDirectory('/');
+        function syncFSToBrowser() {
+            if (!pyodide) return;
+            const currentDir = pyodide.FS.cwd();
+            const storedFiles = {};
+            scanPyodideDirectoryRecursive(currentDir, currentDir, storedFiles);
             setStoredFiles(storedFiles);
         }
 
         function renderFileList() {
             const listEl = document.getElementById('file-list');
             listEl.innerHTML = '';
-
-            const names = new Set([
-                ...Object.keys(getStoredFiles()),
-                ...repositoryDataFiles
-            ]);
-            const filenames = Array.from(names).sort((a, b) => a.localeCompare(b));
+            const files = getStoredFiles();
+            const filenames = Object.keys(files).sort();
 
             if (filenames.length === 0) {
-                const emptyItem = document.createElement('li');
-                emptyItem.style.cssText = 'color: var(--text-muted); font-size: 0.8rem; padding: 6px;';
-                emptyItem.textContent = 'No storage entries found.';
-                listEl.appendChild(emptyItem);
+                listEl.innerHTML = `<li style="color: var(--text-muted); font-size: 0.8rem; padding: 6px;">No files in virtual storage.</li>`;
                 return;
             }
 
             filenames.forEach(name => {
                 const li = document.createElement('li');
                 li.className = 'file-item';
-
-                const label = document.createElement('span');
-                label.textContent = name;
-                label.title = name;
-                label.style.cssText = 'flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
-                label.addEventListener('click', () => loadFileIntoEditor(name));
-                li.appendChild(label);
-
-                const actions = document.createElement('div');
-                actions.className = 'file-actions';
-
-                const openButton = document.createElement('button');
-                openButton.textContent = 'Open';
-                openButton.addEventListener('click', () => loadFileIntoEditor(name));
-                actions.appendChild(openButton);
-
-                // Files committed to data/ are read-only in the file manager.
-                if (!repositoryDataFiles.has(name)) {
-                    const deleteButton = document.createElement('button');
-                    deleteButton.className = 'danger';
-                    deleteButton.textContent = 'Delete';
-                    deleteButton.addEventListener('click', () => deleteFile(name));
-                    actions.appendChild(deleteButton);
-                }
-
-                li.appendChild(actions);
+                li.innerHTML = `
+                    <span onclick="loadFileIntoEditor('${name}')" style="flex:1; overflow:hidden; text-overflow:ellipsis;" title="${name}">${name}</span>
+                    <div class="file-actions">
+                        <button onclick="loadFileIntoEditor('${name}')">Open</button>
+                        <button class="danger" onclick="deleteFile('${name}')">Delete</button>
+                    </div>
+                `;
                 listEl.appendChild(li);
             });
         }
 
         function loadFileIntoEditor(filename) {
-            const safePath = normalizeVirtualPath(filename);
-            if (!safePath) return;
-
-            const content = readVirtualFile(safePath);
-            if (content !== null) {
-                document.getElementById('file-name-input').value = safePath;
-                document.getElementById('file-content-input').value = content;
+            const files = getStoredFiles();
+            if (files[filename] !== undefined) {
+                document.getElementById('file-name-input').value = filename;
+                document.getElementById('file-content-input').value = files[filename];
             }
         }
 
         function saveFileFromUI() {
-            const rawName = document.getElementById('file-name-input').value.trim();
+            const name = document.getElementById('file-name-input').value.trim().replace(/^\/+/, '');
             const content = document.getElementById('file-content-input').value;
-            const name = normalizeVirtualPath(rawName);
-            if (!name) return alert('Error: Enter a valid relative file path (for example: output/result.csv).');
-            if (repositoryDataFiles.has(name)) {
-                return alert('Files committed under data/ are read-only. Save your changes under a different name.');
-            }
-            if (!pyodide) return;
+            if (!name) return alert("Error: Target file path cannot be empty (e.g. data/example.csv).");
 
-            try {
-                writeVirtualFile(name, content);
+            if (pyodide) {
+                writeFileToPyodide(name, content);
                 syncFSToBrowser();
-            } catch (err) {
-                alert(`Could not write file: ${err.message}`);
             }
         }
 
         function deleteFile(filename) {
-            const safePath = normalizeVirtualPath(filename);
-            if (!safePath) return;
-            if (repositoryDataFiles.has(safePath)) {
-                return alert('Files committed under data/ cannot be deleted from the browser.');
-            }
-            if (!confirm(`Confirm deletion of file: '${safePath}'?`)) return;
-
+            if (!confirm(`Confirm deletion of file: '${filename}'?`)) return;
             if (pyodide) {
-                try { pyodide.FS.unlink('/' + safePath); } catch (err) {}
+                try { pyodide.FS.unlink(filename); } catch (e) {}
             }
             const files = getStoredFiles();
-            delete files[safePath];
+            delete files[filename];
             setStoredFiles(files);
         }
 
+        // 7. Notebook Cell Management
         function createCellElement(initialCode = '') {
             const cellId = 'cell-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
             const cell = document.createElement('div');
@@ -857,6 +980,7 @@ print(text)`
             delete resEl.dataset.rawHtml;
         }
 
+        // 8. Code Execution Engine
         async function runCell(cellId) {
             if (!pyodide) return;
 
@@ -936,6 +1060,7 @@ print(text)`
             }
         }
 
+        // 9. Jupyter (.ipynb) Export
         function formatSourceArray(text) {
             if (!text) return [];
             const lines = text.split('\n');
@@ -1047,7 +1172,7 @@ print(text)`
         }
 
         function resetEnvironment() {
-            if (!confirm("Warning: This action will purge all active cells and stored virtual files. Proceed?")) return;
+            if (!confirm("Warning: This action will purge all active cells and cached virtual files, and re-fetch from the repository './data' folder. Proceed?")) return;
             localStorage.removeItem(STORAGE_FS_KEY);
             localStorage.removeItem(STORAGE_CELLS_KEY);
             location.reload();
