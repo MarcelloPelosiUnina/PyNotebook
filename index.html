@@ -1,3 +1,4 @@
+```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -181,45 +182,16 @@
             align-items: center;
         }
 
-        .remote-sync-panel {
-            padding: 10px 12px;
+        .directory-status-bar {
+            padding: 8px 15px;
             border-bottom: 1px solid var(--border);
             background-color: var(--bg-dark);
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-
-        .remote-sync-panel label,
-        .file-editor-panel label {
-            font-size: 0.72rem;
-            font-weight: 600;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .remote-row {
-            display: flex;
-            gap: 4px;
-        }
-
-        .remote-row input {
-            flex: 1;
-            background-color: var(--bg-cell);
-            border: 1px solid var(--border);
-            color: var(--text-main);
-            padding: 5px 8px;
-            border-radius: 4px;
-            font-family: monospace;
-            font-size: 0.78rem;
-            outline: none;
-        }
-
-        .remote-status {
             font-size: 0.74rem;
             color: var(--text-muted);
             font-family: monospace;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
         .file-list {
@@ -267,6 +239,14 @@
             background-color: var(--bg-dark);
         }
 
+        .file-editor-panel label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
         .file-editor-panel input,
         .file-editor-panel textarea {
             width: 100%;
@@ -281,8 +261,7 @@
         }
 
         .file-editor-panel input:focus,
-        .file-editor-panel textarea:focus,
-        .remote-row input:focus {
+        .file-editor-panel textarea:focus {
             border-color: var(--text-muted);
         }
 
@@ -428,19 +407,11 @@
         <aside class="sidebar">
             <div class="sidebar-header">
                 <span>Virtual File System</span>
-                <button onclick="syncBrowserToFS()">Sync FS</button>
+                <button onclick="fetchRemoteDirectory()" id="btn-reload-data" disabled>Reload ./data</button>
             </div>
 
-            <!-- Remote / Local Directory Mount Panel -->
-            <div class="remote-sync-panel">
-                <label>Repository Directory Loader</label>
-                <div class="remote-row">
-                    <input type="text" id="target-folder-input" value="data" placeholder="Folder path (e.g. data)">
-                    <button onclick="fetchRemoteDirectory()" id="btn-fetch-remote" disabled>Fetch</button>
-                    <button onclick="document.getElementById('local-dir-picker').click()" id="btn-mount-local" disabled title="Mount local directory from disk">Local</button>
-                    <input type="file" id="local-dir-picker" webkitdirectory directory multiple style="display:none" onchange="handleLocalDirectoryMount(event)">
-                </div>
-                <div id="remote-status" class="remote-status">Target: ./data/</div>
+            <div class="directory-status-bar">
+                <span id="remote-status">Mounting ./data/ ...</span>
             </div>
 
             <ul id="file-list" class="file-list"></ul>
@@ -561,14 +532,14 @@ df`
                 statusEl.textContent = "Loading Packages";
                 await pyodide.loadPackage(['numpy', 'pandas']);
 
-                // Create default 'data' directory in Pyodide FS
+                // Create fixed 'data' directory in Pyodide FS
                 ensurePyodideDir(DEFAULT_DATA_DIR);
 
                 // Restore previously saved files from localStorage
                 syncBrowserToFS();
 
-                // Automatically fetch files from the repository's './data' folder
-                await fetchRemoteDirectory(DEFAULT_DATA_DIR);
+                // Automatically fetch files from the repository's fixed './data' folder
+                await fetchRemoteDirectory();
 
                 statusEl.textContent = "Ready (Python 3.11)";
                 statusEl.classList.add('ready');
@@ -576,8 +547,7 @@ df`
                 document.getElementById('btn-add-cell').disabled = false;
                 document.getElementById('btn-run-all').disabled = false;
                 document.getElementById('btn-save-file').disabled = false;
-                document.getElementById('btn-fetch-remote').disabled = false;
-                document.getElementById('btn-mount-local').disabled = false;
+                document.getElementById('btn-reload-data').disabled = false;
                 document.querySelectorAll('.run-btn').forEach(btn => btn.disabled = false);
 
             } catch (err) {
@@ -614,7 +584,7 @@ df`
             pyodide.FS.writeFile(normalized, content, { encoding: 'utf8' });
         }
 
-        // 4. Automatic Remote Directory Discovery (GitHub Pages API + Index Listing + Manifest)
+        // 4. Automatic Fixed './data' Directory Discovery
         function isTextFile(filename) {
             const lower = filename.toLowerCase();
             return ALLOWED_TEXT_EXTENSIONS.some(ext => lower.endsWith(ext));
@@ -624,10 +594,8 @@ df`
             const host = window.location.hostname;
             const pathParts = window.location.pathname.split('/').filter(Boolean);
 
-            // Standard GitHub Pages URL: https://{owner}.github.io/{repo}/...
             if (host.endsWith('.github.io')) {
                 const owner = host.split('.')[0];
-                // Remove index.html if present at the end
                 const cleanParts = [...pathParts];
                 if (cleanParts.length > 0 && cleanParts[cleanParts.length - 1].includes('.')) {
                     cleanParts.pop();
@@ -641,11 +609,9 @@ df`
             return null;
         }
 
-        async function fetchRemoteDirectory(folderOverride) {
-            const inputEl = document.getElementById('target-folder-input');
+        async function fetchRemoteDirectory() {
             const statusEl = document.getElementById('remote-status');
-            const targetFolder = (folderOverride || inputEl.value || DEFAULT_DATA_DIR).trim().replace(/^\/+|\/+$/g, '');
-            inputEl.value = targetFolder;
+            const targetFolder = DEFAULT_DATA_DIR;
 
             ensurePyodideDir(targetFolder);
             statusEl.textContent = `Scanning ./${targetFolder}/ ...`;
@@ -670,10 +636,9 @@ df`
                 }
             }
 
-            // Strategy B: Optional ./{folder}/index.json or directory HTML listing (works on local Python http.server / Nginx / Apache)
+            // Strategy B: Optional ./data/index.json manifest
             if (loadedCount === 0) {
                 try {
-                    // Check if a manifest JSON exists at ./data/index.json
                     const manifestRes = await fetch(`${targetFolder}/index.json`, { cache: 'no-cache' });
                     if (manifestRes.ok) {
                         const fileList = await manifestRes.json();
@@ -725,7 +690,7 @@ df`
             syncFSToBrowser();
             statusEl.textContent = loadedCount > 0
                 ? `Mounted ${loadedCount} file(s) from ./${targetFolder}/`
-                : `Directory ./${targetFolder}/ ready (${Object.keys(getStoredFiles()).length} cached)`;
+                : `Directory ./${targetFolder}/ active (${Object.keys(getStoredFiles()).length} cached)`;
         }
 
         async function processGitHubContentsRecursively(items, baseVirtualPath) {
@@ -768,32 +733,7 @@ df`
             }
         }
 
-        // 5. Local Disk Directory Mount (for offline/local testing)
-        async function handleLocalDirectoryMount(event) {
-            const files = Array.from(event.target.files || []);
-            if (files.length === 0) return;
-
-            const targetFolder = (document.getElementById('target-folder-input').value || DEFAULT_DATA_DIR).trim().replace(/^\/+|\/+$/g, '');
-            const statusEl = document.getElementById('remote-status');
-            let mounted = 0;
-
-            for (const file of files) {
-                if (!isTextFile(file.name)) continue;
-                const text = await file.text();
-                // Strip the root selected folder name and mount inside targetFolder (e.g., 'data/...')
-                const relParts = (file.webkitRelativePath || file.name).split('/');
-                const subPath = relParts.length > 1 ? relParts.slice(1).join('/') : file.name;
-                const finalPath = `${targetFolder}/${subPath}`;
-                writeFileToPyodide(finalPath, text);
-                mounted++;
-            }
-
-            syncFSToBrowser();
-            statusEl.textContent = `Mounted ${mounted} local file(s) into ./${targetFolder}/`;
-            event.target.value = '';
-        }
-
-        // 6. Recursive Synchronization Between Pyodide FS and Browser localStorage
+        // 5. Recursive Synchronization Between Pyodide FS and Browser localStorage
         function getStoredFiles() {
             const raw = localStorage.getItem(STORAGE_FS_KEY);
             return raw ? JSON.parse(raw) : {};
@@ -877,9 +817,14 @@ df`
         }
 
         function saveFileFromUI() {
-            const name = document.getElementById('file-name-input').value.trim().replace(/^\/+/, '');
+            let name = document.getElementById('file-name-input').value.trim().replace(/^\/+/, '');
             const content = document.getElementById('file-content-input').value;
             if (!name) return alert("Error: Target file path cannot be empty (e.g. data/example.csv).");
+
+            if (!name.includes('/')) {
+                name = `${DEFAULT_DATA_DIR}/${name}`;
+                document.getElementById('file-name-input').value = name;
+            }
 
             if (pyodide) {
                 writeFileToPyodide(name, content);
@@ -897,7 +842,7 @@ df`
             setStoredFiles(files);
         }
 
-        // 7. Notebook Cell Management
+        // 6. Notebook Cell Management
         function createCellElement(initialCode = '') {
             const cellId = 'cell-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
             const cell = document.createElement('div');
@@ -980,7 +925,7 @@ df`
             delete resEl.dataset.rawHtml;
         }
 
-        // 8. Code Execution Engine
+        // 7. Code Execution Engine
         async function runCell(cellId) {
             if (!pyodide) return;
 
@@ -1060,7 +1005,7 @@ df`
             }
         }
 
-        // 9. Jupyter (.ipynb) Export
+        // 8. Jupyter (.ipynb) Export
         function formatSourceArray(text) {
             if (!text) return [];
             const lines = text.split('\n');
@@ -1189,3 +1134,5 @@ df`
     </script>
 </body>
 </html>
+
+```
