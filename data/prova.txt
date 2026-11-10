@@ -1,2 +1,0 @@
-nome, cognome, età
-Marcello,Pelosi,28
